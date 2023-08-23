@@ -14,6 +14,7 @@
 
 # Once nested repositories work, this file should cease to exist.
 
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 load("//go/private:common.bzl", "MINIMUM_BAZEL_VERSION")
 load("//go/private/skylib/lib:versions.bzl", "versions")
 load("//go/private:nogo.bzl", "DEFAULT_NOGO", "go_register_nogo")
@@ -57,6 +58,13 @@ def go_rules_dependencies(force = False):
         ],
         sha256 = "66ffd9315665bfaafc96b52278f57c7e2dd09f5ede279ea6d39b2be471e7e3aa",
         strip_prefix = "",
+    )
+
+    wrapper(
+        git_repository,
+        name = "rules_proto",
+        remote = "https://github.com/bazelbuild/rules_proto.git",
+        tag = "5.3.0-21.7",
     )
 
     # Needed for nogo vet checks and go/packages.

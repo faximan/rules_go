@@ -42,11 +42,17 @@ load(
 load(
     "@rules_proto//proto:defs.bzl",
     "ProtoInfo",
+    "proto_common",
 )
 
 GoProtoImports = provider()
 
-def get_imports(attr):
+ProtoLangToolchainInfo = proto_common.ProtoLangToolchainInfo
+
+def _filter_provider(provider, *attrs):
+    return [dep[provider] for attr in attrs for dep in attr if provider in dep]
+
+def get_imports(ctx, target):
     proto_deps = []
 
     # ctx.attr.proto is a one-element array since there is a Starlark transition attached to it.
@@ -62,27 +68,75 @@ def get_imports(attr):
         for src in dep[ProtoInfo].check_deps_sources.to_list():
             direct["{}={}".format(proto_path(src, dep[ProtoInfo]), attr.importpath)] = True
 
-    deps = getattr(attr, "deps", []) + getattr(attr, "embed", [])
-    transitive = [
-        dep[GoProtoImports].imports
-        for dep in deps
-        if GoProtoImports in dep
-    ]
-    return depset(direct = direct.keys(), transitive = transitive)
+    proto_lang_toolchain_info = ctx.attr._aspect_proto_toolchain[ProtoLangToolchainInfo]
+    api_deps = [proto_lang_toolchain_info.runtime]
 
-def _go_proto_aspect_impl(_target, ctx):
-    imports = get_imports(ctx.rule.attr)
-    return [GoProtoImports(imports = imports)]
+    generated_sources = []
+    proto_info = target[ProtoInfo]
+    if proto_info.direct_sources:
+        # Generate pb files
+        generated_sources = proto_common.declare_generated_files(
+            actions = ctx.actions,
+            proto_info = proto_info,
+            extension = ".pb.go",
+            name_mapper = lambda name: name.replace("-", "_").replace(".", "/"),
+        )
+
+        # Handles multiple repository and virtual import cases
+        proto_root = proto_info.proto_source_root
+        if proto_root.startswith(ctx.bin_dir.path):
+            plugin_output = proto_root
+        else:
+            plugin_output = ctx.bin_dir.path + "/" + proto_root
+
+        if plugin_output == ".":
+            plugin_output = ctx.bin_dir.path
+
+        proto_common.compile(
+            actions = ctx.actions,
+            proto_info = proto_info,
+            proto_lang_toolchain_info = proto_lang_toolchain_info,
+            generated_files = generated_sources,
+            plugin_output = plugin_output,
+        )
+
+    # Generated sources == Golang sources
+    golang_sources = generated_sources
+
+    deps = _filter_provider(GoProtoImports, getattr(attr, "deps", [])) + _filter_provider(GoProtoImports, getattr(attr, "embed", []))
+    runfiles_from_proto_deps = depset(
+        transitive = [dep[DefaultInfo].default_runfiles.files for dep in api_deps] +
+                     [dep.runfiles_from_proto_deps for dep in deps],
+    )
+    transitive_sources = depset(
+        direct = golang_sources,
+        transitive = [dep.transitive_sources for dep in deps],
+    )
+    return [GoProtoImports(
+        imports = depset(
+            transitive = [dep[GoProtoImports].imports for dep in api_deps],
+        ),
+        runfiles_from_proto_deps = runfiles_from_proto_deps,
+        transitive_sources = transitive_sources,
+    )]
+
+def _go_proto_aspect_impl(target, ctx):
+    return get_imports(ctx, target)
 
 _go_proto_aspect = aspect(
     _go_proto_aspect_impl,
+    attrs = {
+        "_aspect_proto_toolchain": attr.label(
+            default = ":go_toolchain",
+        ),
+    },
     attr_aspects = [
         "deps",
         "embed",
     ],
 )
 
-def _proto_library_to_source(_go, attr, source, merge):
+def _proto_library_to_source(go, attr, source, merge):
     if attr.compiler:
         compilers = [attr.compiler]
     else:
@@ -124,7 +178,7 @@ def _go_proto_library_impl(ctx):
             go,
             compiler = compiler,
             protos = [d[ProtoInfo] for d in proto_deps],
-            imports = get_imports(ctx.attr),
+            imports = get_imports(ctx),
             importpath = go.importpath,
         ))
     library = go.new_library(
